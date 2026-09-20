@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "id": "turbinebmw.sysmon",
+  "name": "System monitor",
+  "version": "1.0.0",
+  "author": "turbinebmw",
+  "license": "MIT",
+  "description": "CPU, temperature, memory, fan, and disk pills with an inline meter and an Omarchy card.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "System monitor",
+    "description": "One stat: a glyph, a live meter beside it, and a card with the detail.",
+    "category": "System",
+    "allowMultiple": true,
+    "defaultSection": "left",
+    "defaults": {
+      "stat": "cpu",
+      "mount": "/",
+      "fanMaxRpm": 8800,
+      "warningThreshold": 75,
+      "criticalThreshold": 90
+    },
+    "schema": [
+      {
+        "key": "stat",
+        "type": "enum",
+        "label": "Stat",
+        "options": [
+          "cpu",
+          "temperature",
+          "memory",
+          "fan",
+          "disk"
+        ],
+        "defaultValue": "cpu",
+        "description": "Which reading this instance shows. Add one instance per stat you want on the bar."
+      },
+      {
+        "key": "mount",
+        "type": "string",
+        "label": "Disk mount point",
+        "defaultValue": "/",
+        "description": "Filesystem the disk pill reports. Only used when stat is disk."
+      },
+      {
+        "key": "fanMaxRpm",
+        "type": "integer",
+        "label": "Fan full-scale RPM",
+        "min": 1000,
+        "max": 30000,
+        "step": 100,
+        "defaultValue": 8800,
+        "description": "RPM the fan meter treats as full. Only used when stat is fan."
+      },
+      {
+        "key": "warningThreshold",
+        "type": "integer",
+        "label": "Warning threshold (%)",
+        "min": 1,
+        "max": 100,
+        "step": 1,
+        "defaultValue": 75
+      },
+      {
+        "key": "criticalThreshold",
+        "type": "integer",
+        "label": "Critical threshold (%)",
+        "min": 1,
+        "max": 100,
+        "step": 1,
+        "defaultValue": 90
+      }
+    ]
+  }
+}

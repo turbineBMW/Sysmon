@@ -1,0 +1,118 @@
+#!/usr/bin/env sh
+
+# Slow-cadence facts for Service.qml, plus discovery of the sysfs files the
+# in-process sampler reads directly via FileView: the CPU package temperature
+# and every hwmon fan (with label). The fast-changing values themselves are
+# NOT sampled here — only where to find them. Output is one
+# "<key> <value...>" line per fact:
+#
+#   temp <path>
+#   fan <path> <label...>
+#   diskfs <pct> <usedKb> <freeKb> <totalKb> <device> <mount>
+#
+# Ported from willshell's system-monitor-slow / system-monitor-temp-path.
+
+sysfs_root=${SYSMON_SYSFS_ROOT:-/sys}
+
+sane() {
+  [ -r "$1" ] || return 1
+  value=$(cat "$1" 2>/dev/null)
+  case "$value" in ''|*[!0-9]*) return 1;; esac
+  c=$((value / 1000))
+  [ "$c" -gt 0 ] && [ "$c" -lt 130 ]
+}
+
+# Sysfs numbering is probe-order dependent, so the first thermal zone is often
+# an ACPI board or ambient sensor rather than the CPU. Prefer semantic hwmon
+# labels and known CPU drivers, falling back to first-sane-source.
+find_temp_path() {
+  package0=""
+  control=""
+  die=""
+  package_any=""
+  for f in "$sysfs_root"/class/hwmon/hwmon*/temp*_input; do
+    sane "$f" || continue
+    base=${f%_input}
+    label=$(cat "${base}_label" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    case "$label" in
+      "package id 0"|"physical id 0"|"cpu package")
+        [ -n "$package0" ] || package0=$f ;;
+      tctl)
+        [ -n "$control" ] || control=$f ;;
+      tdie)
+        [ -n "$die" ] || die=$f ;;
+      "package id "*|"physical id "*)
+        [ -n "$package_any" ] || package_any=$f ;;
+    esac
+  done
+
+  for f in "$package0" "$control" "$die" "$package_any"; do
+    if [ -n "$f" ]; then printf '%s\n' "$f"; return 0; fi
+  done
+
+  # Some CPU temperature drivers do not provide useful per-input labels.
+  for d in "$sysfs_root"/class/hwmon/hwmon*; do
+    [ -r "$d/name" ] || continue
+    name=$(cat "$d/name" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    case "$name" in
+      coretemp|k10temp|zenpower|cputemp|cpu_thermal|cpu-thermal)
+        for f in "$d"/temp*_input; do
+          if sane "$f"; then printf '%s\n' "$f"; return 0; fi
+        done ;;
+    esac
+  done
+
+  # Thermal zones have a stable type even though thermal_zoneN does not have a
+  # stable number. Avoid broad names such as acpitz and INT3400 Thermal here.
+  for d in "$sysfs_root"/class/thermal/thermal_zone*; do
+    [ -r "$d/type" ] || continue
+    type=$(cat "$d/type" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    case "$type" in
+      x86_pkg_temp|cpu_thermal|cpu-thermal|cpu[0-9]*-thermal|soc_thermal|soc-thermal|tcpu)
+        if sane "$d/temp"; then printf '%s\n' "$d/temp"; return 0; fi ;;
+    esac
+  done
+
+  # Unknown hardware: show something rather than nothing.
+  for f in "$sysfs_root"/class/thermal/thermal_zone*/temp "$sysfs_root"/class/hwmon/hwmon*/temp*_input; do
+    if sane "$f"; then printf '%s\n' "$f"; return 0; fi
+  done
+  return 1
+}
+
+temp_path=$(find_temp_path)
+[ -n "$temp_path" ] && echo "temp $temp_path"
+
+# Label comes from fanN_label when the driver provides one, else
+# "<hwmon name> fanN".
+for f in "$sysfs_root"/class/hwmon/hwmon*/fan*_input; do
+  [ -r "$f" ] || continue
+  dir=${f%/*}
+  idx=${f##*/}
+  idx=${idx%_input}
+  label=$(cat "$dir/${idx}_label" 2>/dev/null)
+  if [ -z "$label" ]; then
+    hname=$(cat "$dir/name" 2>/dev/null)
+    label="${hname:-hwmon} $idx"
+  fi
+  echo "fan $f $label"
+done
+
+# Real filesystems, deduped by device; btrfs subvolume mounts share a device,
+# so keep the shortest mountpoint.
+df -Pk -x tmpfs -x devtmpfs -x efivarfs -x overlay 2>/dev/null | awk '
+  NR > 1 {
+    dev = $1
+    pct = $5
+    gsub(/%/, "", pct)
+    mp = $6
+    for (i = 7; i <= NF; i++) mp = mp " " $i
+    if (!(dev in best) || length(mp) < length(best[dev])) {
+      best[dev] = mp
+      line[dev] = "diskfs " pct " " $3 " " $4 " " $2 " " dev " " mp
+    }
+  }
+  END { for (d in line) print line[d] }
+' | sort -k7
+
+exit 0

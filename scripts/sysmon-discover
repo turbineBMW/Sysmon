@@ -9,6 +9,8 @@
 #   temp <path>
 #   fan <path> <label...>
 #   diskfs <pct> <usedKb> <freeKb> <totalKb> <device> <mount>
+#   gpu <device dir> <card> <driver>
+#   gpuhwmon <temp file|-> <power file|-> <clock file|-> <power label...>
 #
 # Ported from willshell's system-monitor-slow / system-monitor-temp-path.
 
@@ -96,6 +98,34 @@ for f in "$sysfs_root"/class/hwmon/hwmon*/fan*_input; do
     label="${hname:-hwmon} $idx"
   fi
   echo "fan $f $label"
+done
+
+# The first GPU whose driver reports a busy percentage. amdgpu does; i915, xe
+# and nvidia do not, so those machines simply get no GPU reading. The card's
+# own hwmon carries its temperature, power, and shader clock. On an APU the
+# power sensor is "PPT", the whole package, so its label is passed through
+# for the card to say so.
+for d in "$sysfs_root"/class/drm/card[0-9]*; do
+  case ${d##*/} in *-*) continue ;; esac
+  dev="$d/device"
+  [ -r "$dev/gpu_busy_percent" ] || continue
+  driver=$(basename "$(readlink "$dev/driver" 2>/dev/null)" 2>/dev/null)
+  echo "gpu $dev ${d##*/} ${driver:-gpu}"
+  for h in "$dev"/hwmon/hwmon*; do
+    [ -d "$h" ] || continue
+    temp=-
+    power=-
+    clock=-
+    [ -r "$h/temp1_input" ] && temp="$h/temp1_input"
+    if [ -r "$h/power1_average" ]; then power="$h/power1_average"
+    elif [ -r "$h/power1_input" ]; then power="$h/power1_input"
+    fi
+    [ -r "$h/freq1_input" ] && clock="$h/freq1_input"
+    plabel=$(cat "$h/power1_label" 2>/dev/null)
+    echo "gpuhwmon $temp $power $clock ${plabel:-power}"
+    break
+  done
+  break
 done
 
 # Real filesystems, deduped by device; btrfs subvolume mounts share a device,

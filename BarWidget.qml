@@ -86,6 +86,7 @@ Panel {
   readonly property real rawValue: {
     if (!service) return -1
     switch (stat) {
+    case "gpu": return service.gpuPercent
     case "temperature": return service.tempC
     case "memory": return service.memPercent
     case "fan": return service.fanRpm
@@ -201,6 +202,62 @@ Panel {
 
   Component.onDestruction: if (service && opened) service.removeViewer()
 
+  // ---- pill menu -----------------------------------------------------------
+
+  // Right click opens a checklist of which stats have a pill on the bar. A
+  // widget cannot rewrite the bar layout itself, so ticking a stat runs
+  // scripts/sysmon-pills, which edits shell.json the way `omarchy bar` does;
+  // the bar then builds or drops that pill.
+  property bool menuOpen: false
+
+  readonly property string pillsScript: String(Qt.resolvedUrl("scripts/sysmon-pills")).replace(/^file:\/\//, "")
+
+  // Stats with a pill anywhere on the bar, read from the layout the bar hands
+  // its widgets, so every pill's menu agrees with the bar as it stands.
+  readonly property var statsOnBar: {
+    var layout = bar && bar.layoutConfig ? bar.layoutConfig : ({})
+    var found = []
+    for (var section in layout) {
+      var entries = Array.isArray(layout[section]) ? layout[section] : []
+      for (var i = 0; i < entries.length; i++) {
+        var entry = entries[i]
+        if (!entry || entry.id !== root.moduleName) continue
+        var s = String(entry.stat || "cpu")
+        if (found.indexOf(s) === -1) found.push(s)
+      }
+    }
+    return found
+  }
+
+  // The stat whose change is still on its way to the bar. Further clicks wait
+  // for it, so one menu never queues edits against a layout it has not seen.
+  property string pendingStat: ""
+
+  function statOnBar(s) { return statsOnBar.indexOf(s) !== -1 }
+  // The last pill stays: it is the only way back into this menu.
+  function statLocked(s) { return statOnBar(s) && statsOnBar.length <= 1 }
+
+  function togglePill(s) {
+    if (pendingStat !== "" || statLocked(s)) return
+    pendingStat = s
+    Quickshell.execDetached([pillsScript, s, statOnBar(s) ? "off" : "on"])
+  }
+
+  onStatsOnBarChanged: pendingStat = ""
+
+  Timer {
+    interval: 4000
+    running: root.pendingStat !== ""
+    onTriggered: root.pendingStat = ""
+  }
+
+  // PopupCard closes through its owner; this one closes the menu, not the
+  // card, and the bar's popout handoff closes it when the card opens.
+  QtObject {
+    id: menuOwner
+    function close() { root.menuOpen = false }
+  }
+
   // ---- bar pill ------------------------------------------------------------
 
   WidgetButton {
@@ -215,7 +272,7 @@ Panel {
     active: root.alarming
 
     onPressed: function(code) {
-      if (code === Qt.RightButton && root.bar) root.bar.run("omarchy-launch-or-focus-tui btop")
+      if (code === Qt.RightButton) root.menuOpen = !root.menuOpen
       else root.toggle()
     }
 
@@ -273,6 +330,62 @@ Panel {
           Behavior on width { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
           Behavior on height { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
           Behavior on color { ColorAnimation { duration: 200 } }
+        }
+      }
+    }
+  }
+
+  // ---- menu ----------------------------------------------------------------
+
+  PopupCard {
+    id: menu
+    anchorItem: button
+    owner: menuOwner
+    bar: root.bar
+    open: root.menuOpen
+    contentWidth: menu.fittedContentWidth(Style.space(260))
+    contentHeight: menu.fittedContentHeight(menuColumn.implicitHeight)
+
+    Column {
+      id: menuColumn
+      width: parent.width
+      spacing: Style.space(6)
+
+      Text {
+        textFormat: Text.PlainText
+        text: "Show on bar"
+        color: root.foreground
+        opacity: 0.6
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Repeater {
+        model: Model.statIds()
+
+        Toggle {
+          required property string modelData
+          width: menuColumn.width
+          label: Model.statDef(modelData).title
+          description: root.statLocked(modelData) ? "The last pill stays on the bar" : ""
+          checked: root.pendingStat === modelData ? !root.statOnBar(modelData) : root.statOnBar(modelData)
+          opacity: root.statLocked(modelData) ? 0.6 : 1
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.togglePill(modelData)
+        }
+      }
+
+      PanelSeparator { foreground: root.foreground }
+
+      Button {
+        width: parent.width
+        text: "Open btop"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        onClicked: {
+          root.menuOpen = false
+          if (root.bar) root.bar.run("omarchy-launch-or-focus-tui btop")
         }
       }
     }
@@ -516,6 +629,108 @@ Panel {
                 }
               }
             }
+          }
+
+          // ---------- GPU ----------
+          Row {
+            visible: root.stat === "gpu"
+            width: parent.width
+            spacing: Style.space(20)
+
+            Column {
+              width: (parent.width - parent.spacing) / 2
+              spacing: Style.spacing.labelGap
+              InfoPair { label: "Clock"; value: root.service ? Model.formatMhz(root.service.gpuClockMhz) : "—" }
+              InfoPair {
+                label: "Temp"
+                value: root.service && root.service.gpuTempC >= 0 ? root.service.gpuTempC + "°C" : "—"
+              }
+              InfoPair {
+                label: "Video"
+                value: root.service && root.service.gpuVideoPercent >= 0 ? root.service.gpuVideoPercent + "%" : "—"
+              }
+            }
+
+            Column {
+              width: (parent.width - parent.spacing) / 2
+              spacing: Style.spacing.labelGap
+              // On an APU the only power sensor is PPT, the whole package, so
+              // say that rather than passing it off as the GPU's own draw.
+              InfoPair {
+                label: root.service && root.service.gpuPowerLabel === "PPT" ? "Package" : "Power"
+                value: root.service ? Model.formatWatts(root.service.gpuPowerW) : "—"
+              }
+              InfoPair { label: "Device"; value: root.service && root.service.gpuCard !== "" ? root.service.gpuCard : "—" }
+              InfoPair { label: "Driver"; value: root.service && root.service.gpuDriver !== "" ? root.service.gpuDriver : "—" }
+            }
+          }
+
+          Column {
+            visible: root.stat === "gpu" && !!root.service && root.service.gpuDevice !== ""
+            width: parent.width
+            spacing: Style.space(8)
+
+            PanelSeparator { foreground: root.foreground }
+
+            PanelSectionHeader {
+              text: "GPU MEMORY"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            // VRAM is the dedicated carve-out; GTT is system RAM the GPU has
+            // mapped. On an APU most of the model weights live in GTT.
+            Repeater {
+              model: root.service ? [
+                { "label": "VRAM", "used": root.service.gpuVramUsed, "total": root.service.gpuVramTotal },
+                { "label": "Shared", "used": root.service.gpuGttUsed, "total": root.service.gpuGttTotal }
+              ] : []
+
+              Row {
+                required property var modelData
+                visible: modelData.total > 0
+                width: parent.width
+                spacing: Style.space(10)
+
+                Text {
+                  id: gpuMemLabel
+                  text: modelData.label
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  width: Style.space(56)
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                MiniMeter {
+                  width: parent.width - gpuMemLabel.width - gpuMemValue.width - parent.spacing * 2
+                  value: modelData.total > 0 ? Model.clamp(modelData.used / modelData.total, 0, 1) : 0
+                  hot: modelData.total > 0 && modelData.used / modelData.total >= root.critRatio
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                  id: gpuMemValue
+                  text: Model.formatBytes(modelData.used) + " / " + Model.formatBytes(modelData.total)
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  width: Style.space(130)
+                  horizontalAlignment: Text.AlignRight
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+              }
+            }
+          }
+
+          Text {
+            visible: root.stat === "gpu" && (!root.service || root.service.gpuDevice === "")
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: "No GPU busy reading found. Sysmon reads amdgpu's gpu_busy_percent; Intel and NVIDIA drivers don't expose one."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
           }
 
           // ---------- Temperature ----------

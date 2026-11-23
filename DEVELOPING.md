@@ -14,6 +14,7 @@ then a headline meter; then the detail.
 | `stat`        | Icon | Card shows |
 |---------------|------|------------|
 | `cpu`         | chip with pins | Frequency, core count, load averages, a per-core meter grid |
+| `gpu`         | dual-fan card | Shader clock, temperature, video engine, power, device, VRAM and shared (GTT) memory meters |
 | `temperature` | thermometer | Sensor, current fan speed, warning and critical points |
 | `memory`      | memory module | Used / available / free / cached / buffers / total, plus swap |
 | `fan`         | four skewed blades | One metered row per discovered hwmon fan |
@@ -30,7 +31,7 @@ Nerd Font glyphs came first and were the wrong call: the bar's other icons
 and MDI's `cpu-64-bit` and `memory` carry enough fine detail that at 13px
 they turned to mush beside them.
 
-Two rules keep a sixth icon consistent with these five:
+Two rules keep a seventh icon consistent with these six:
 
 - draw inside the live area, `2..22` on both axes, with 2.2-unit strokes
 - declare the art's real height in `ART_HEIGHT`; `StatIcon` scales every icon
@@ -56,6 +57,7 @@ The plugin is `allowMultiple`, so one entry per stat goes in
 
 ```json
 { "id": "turbinebmw.sysmon", "stat": "cpu" },
+{ "id": "turbinebmw.sysmon", "stat": "gpu" },
 { "id": "turbinebmw.sysmon", "stat": "temperature" },
 { "id": "turbinebmw.sysmon", "stat": "memory" },
 { "id": "turbinebmw.sysmon", "stat": "fan" },
@@ -66,7 +68,30 @@ Per-entry settings: `stat`, `mount` (disk only), `fanMaxRpm` (fan only, the
 RPM the meter treats as full scale), `warningThreshold` and
 `criticalThreshold` (percent).
 
-Left click opens the card, right click opens `btop`.
+Left click opens the card. Right click opens the pill menu: a checklist of
+the six stats, then an "Open btop" button.
+
+## Pill menu
+
+A bar widget cannot rewrite the bar layout. The shell only gives
+`mutateShellConfig` to kind `bar` plugins, and `updateEntryInline` rewrites
+every entry with the same id, which would turn all the pills into one stat.
+`omarchy bar put` leaves a widget that is already on the bar alone, so it
+cannot add a second pill either.
+
+So ticking a stat runs `scripts/sysmon-pills <stat> on|off`, which edits
+`shell.json` through `omarchy-shell-config`'s `commit`, the same atomic
+write-and-reload the `omarchy bar` commands use. It:
+
+- adds a new pill to the section the other pills are in, in menu order
+- removes every pill for that stat
+- refuses to remove the last pill, because that pill is the only way back
+  into the menu
+- takes a lock, so quick clicks cannot race on the file
+
+The menu reads which stats are on the bar from `bar.layoutConfig`, so every
+pill's menu matches the bar. While one change is in flight the menu ignores
+further clicks, until the layout updates or 4s pass.
 
 ## Bar height
 
@@ -97,11 +122,19 @@ Passing no stat addresses every card at once.
 
 `Service.qml` is a `service`-kind plugin mounted once, no matter how many
 pills are on the bar. The fast path spawns no processes: `/proc/stat`,
-`/proc/meminfo`, `/proc/loadavg`, cpufreq, the thermal sensor, and each fan
-are read in-process through `FileView` every 2s. `scripts/sysmon-discover`
-runs every 30s (5s while a card is open) to run `df` and to find *where* the
-thermal sensor and fans live, so hardware that appears late still gets picked
-up.
+`/proc/meminfo`, `/proc/loadavg`, cpufreq, the thermal sensor, each fan, and
+the GPU's sysfs files are read in-process through `FileView` every 2s.
+`scripts/sysmon-discover` runs every 30s (5s while a card is open) to run `df`
+and to find *where* the thermal sensor, fans, and GPU live, so hardware that
+appears late still gets picked up.
+
+The GPU is the first DRM card whose driver exposes `gpu_busy_percent` (amdgpu
+does; i915, xe, and nvidia do not). Its `mem_info_vram_*`, `mem_info_gtt_*`,
+and `vcn_busy_percent` sit beside it, and its own hwmon gives temperature,
+power, and the shader clock. On an APU the only power sensor is `PPT`, the
+whole package, so the card labels it "Package" rather than claiming it as GPU
+power. The NPU (`amdxdna`) has no busy file at all, which is why there is no
+NPU stat.
 
 ## Editing it
 

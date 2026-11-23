@@ -5,7 +5,7 @@
 // battery) are clean silhouettes drawn with ~2-unit strokes, and at the 13px
 // the bar renders them at, MDI's `cpu-64-bit` and `memory` are fussy enough
 // that their detail turns to mush beside them. Drawing our own means one
-// stroke weight, one live area, and one optical height across all five.
+// stroke weight, one live area, and one optical height across all six.
 //
 // Conventions, so a sixth icon added later still matches:
 //   * live area is 2..22 on both axes — art fills it, nothing bleeds past
@@ -66,6 +66,8 @@ function blade(degrees) {
 // "consistent" — a shared viewBox alone would not.
 var ART_HEIGHT = {
   cpu: 20,
+  // Board top to the tips of the edge connector.
+  gpu: 19,
   temperature: 20,
   // The module is turned upright when rendered, making its 20-unit width
   // the painted height.
@@ -92,6 +94,18 @@ function pathFor(stat) {
       rr(18.4, 8.3, 3.6, 2.4, 1), rr(18.4, 13.3, 3.6, 2.4, 1),
       rr(5.5, 5.5, 13, 13, 2.6), rrHole(7.7, 7.7, 8.6, 8.6, 1.5),
       rr(10, 10, 4, 4, 1)
+    ].join(" ")
+
+  // Graphics card seen face-on: an outlined shroud holding two fans, each a
+  // solid disc with its hub bored out, and the PCIe edge connector below,
+  // split by its key. Two fans is what tells it apart from the drive's
+  // single platter.
+  case "gpu":
+    return [
+      rr(2, 2.5, 20, 14, 2.5), rrHole(4.2, 4.7, 15.6, 9.6, 1.5),
+      circ(8.3, 9.5, 3.3), circHole(8.3, 9.5, 1.1),
+      circ(15.7, 9.5, 3.3), circHole(15.7, 9.5, 1.1),
+      rr(4.6, 15, 3.4, 6.5, 0.8), rr(9.4, 15, 9.2, 6.5, 0.8)
     ].join(" ")
 
   // Thermometer: a solid stem running into a solid bulb. Wider than MDI's so

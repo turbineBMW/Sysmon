@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "turbinebmw",
   "license": "MIT",
-  "description": "CPU, temperature, memory, fan, and disk pills with an inline meter and an Omarchy card.",
+  "description": "CPU, GPU, temperature, memory, fan, and disk pills with an inline meter and an Omarchy card.",
   "kinds": [
     "service",
     "bar-widget"
@@ -34,6 +34,7 @@
         "label": "Stat",
         "options": [
           "cpu",
+          "gpu",
           "temperature",
           "memory",
           "fan",

@@ -37,6 +37,31 @@ var STATS = {
       "Every thread on fire"
     ]
   },
+  gpu: {
+    title: "Graphics",
+    unit: "%",
+    calm: [
+      "Pushing a few pixels",
+      "Shaders napping",
+      "Compositing quietly",
+      "Waiting for a frame",
+      "Idling at the desktop"
+    ],
+    busy: [
+      "Shading triangles",
+      "Multiplying matrices",
+      "Rasterizing away",
+      "Filling the pipeline",
+      "Warming the shaders"
+    ],
+    alarm: [
+      "Every shader pegged",
+      "Matrices all the way down",
+      "Tensor cores sweating",
+      "Frame queue overflowing",
+      "Inference at full tilt"
+    ]
+  },
   temperature: {
     title: "CPU temperature",
     unit: "°",
@@ -144,7 +169,7 @@ function statDef(stat) {
 }
 
 function statIds() {
-  return ["cpu", "temperature", "memory", "fan", "disk"]
+  return ["cpu", "gpu", "temperature", "memory", "fan", "disk"]
 }
 
 // Pick a tier from the same ratio the meter draws, then a phrase within it.
@@ -184,6 +209,16 @@ function formatMhz(mhz) {
   return Math.round(mhz) + " MHz"
 }
 
+function formatBytes(bytes) {
+  if (bytes === undefined || bytes === null || bytes < 0) return "—"
+  return formatKb(bytes / 1024)
+}
+
+function formatWatts(w) {
+  if (w === undefined || w < 0) return "—"
+  return w.toFixed(w >= 100 ? 0 : 1) + " W"
+}
+
 function formatRpm(rpm) {
   if (rpm === undefined || rpm < 0) return "—"
   return rpm + " RPM"
@@ -192,6 +227,8 @@ function formatRpm(rpm) {
 // The bar meter has no room for a number, so the tooltip carries it.
 function shortValue(stat, service, mount) {
   switch (String(stat)) {
+  case "gpu":
+    return service.gpuPercent >= 0 ? service.gpuPercent + "%" : "—"
   case "temperature":
     return service.tempC >= 0 ? service.tempC + "°C" : "—"
   case "memory":

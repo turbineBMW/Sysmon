@@ -2,7 +2,7 @@
 
 A small system monitor for the Omarchy bar. Each pill shows one live reading;
 click it for a card with the details. You can put several pills side by side
-for CPU, temperature, memory, fan speed, and disk space.
+for CPU, GPU, temperature, memory, fan speed, and disk space.
 
 ![Sysmon cards and bar meters](docs/sysmon-demo.gif)
 
@@ -19,7 +19,9 @@ to open its card. Right-click opens `btop` when it is installed. The plugin
 reads Linux's `/proc` and `/sys` data and uses standard system tools to find
 disks and sensors; it does not install packages or change system settings.
 Some hardware does not report a temperature or fan speed, so those readings
-may be unavailable.
+may be unavailable. The GPU pill needs a driver that reports a busy
+percentage, which today means AMD (`amdgpu`); Intel and NVIDIA GPUs show no
+reading.
 
 ## Choose your pills
 
@@ -30,6 +32,7 @@ Sysmon allows several copies of its bar widget. In
 ```json
 [
   { "id": "turbinebmw.sysmon", "stat": "cpu" },
+  { "id": "turbinebmw.sysmon", "stat": "gpu" },
   { "id": "turbinebmw.sysmon", "stat": "temperature" },
   { "id": "turbinebmw.sysmon", "stat": "memory" },
   { "id": "turbinebmw.sysmon", "stat": "fan" },

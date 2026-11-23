@@ -86,6 +86,7 @@ Panel {
   readonly property real rawValue: {
     if (!service) return -1
     switch (stat) {
+    case "gpu": return service.gpuPercent
     case "temperature": return service.tempC
     case "memory": return service.memPercent
     case "fan": return service.fanRpm
@@ -516,6 +517,108 @@ Panel {
                 }
               }
             }
+          }
+
+          // ---------- GPU ----------
+          Row {
+            visible: root.stat === "gpu"
+            width: parent.width
+            spacing: Style.space(20)
+
+            Column {
+              width: (parent.width - parent.spacing) / 2
+              spacing: Style.spacing.labelGap
+              InfoPair { label: "Clock"; value: root.service ? Model.formatMhz(root.service.gpuClockMhz) : "—" }
+              InfoPair {
+                label: "Temp"
+                value: root.service && root.service.gpuTempC >= 0 ? root.service.gpuTempC + "°C" : "—"
+              }
+              InfoPair {
+                label: "Video"
+                value: root.service && root.service.gpuVideoPercent >= 0 ? root.service.gpuVideoPercent + "%" : "—"
+              }
+            }
+
+            Column {
+              width: (parent.width - parent.spacing) / 2
+              spacing: Style.spacing.labelGap
+              // On an APU the only power sensor is PPT, the whole package, so
+              // say that rather than passing it off as the GPU's own draw.
+              InfoPair {
+                label: root.service && root.service.gpuPowerLabel === "PPT" ? "Package" : "Power"
+                value: root.service ? Model.formatWatts(root.service.gpuPowerW) : "—"
+              }
+              InfoPair { label: "Device"; value: root.service && root.service.gpuCard !== "" ? root.service.gpuCard : "—" }
+              InfoPair { label: "Driver"; value: root.service && root.service.gpuDriver !== "" ? root.service.gpuDriver : "—" }
+            }
+          }
+
+          Column {
+            visible: root.stat === "gpu" && !!root.service && root.service.gpuDevice !== ""
+            width: parent.width
+            spacing: Style.space(8)
+
+            PanelSeparator { foreground: root.foreground }
+
+            PanelSectionHeader {
+              text: "GPU MEMORY"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            // VRAM is the dedicated carve-out; GTT is system RAM the GPU has
+            // mapped. On an APU most of the model weights live in GTT.
+            Repeater {
+              model: root.service ? [
+                { "label": "VRAM", "used": root.service.gpuVramUsed, "total": root.service.gpuVramTotal },
+                { "label": "Shared", "used": root.service.gpuGttUsed, "total": root.service.gpuGttTotal }
+              ] : []
+
+              Row {
+                required property var modelData
+                visible: modelData.total > 0
+                width: parent.width
+                spacing: Style.space(10)
+
+                Text {
+                  id: gpuMemLabel
+                  text: modelData.label
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  width: Style.space(56)
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                MiniMeter {
+                  width: parent.width - gpuMemLabel.width - gpuMemValue.width - parent.spacing * 2
+                  value: modelData.total > 0 ? Model.clamp(modelData.used / modelData.total, 0, 1) : 0
+                  hot: modelData.total > 0 && modelData.used / modelData.total >= root.critRatio
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                  id: gpuMemValue
+                  text: Model.formatBytes(modelData.used) + " / " + Model.formatBytes(modelData.total)
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  width: Style.space(130)
+                  horizontalAlignment: Text.AlignRight
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+              }
+            }
+          }
+
+          Text {
+            visible: root.stat === "gpu" && (!root.service || root.service.gpuDevice === "")
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: "No GPU busy reading found. Sysmon reads amdgpu's gpu_busy_percent; Intel and NVIDIA drivers don't expose one."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
           }
 
           // ---------- Temperature ----------

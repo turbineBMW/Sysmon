@@ -9,7 +9,7 @@ import Quickshell.Io
 // The fast path spawns no processes: /proc and /sys are read in-process via
 // FileView on one repeating timer. A slow shell poll covers what genuinely
 // needs a process (df) and doubles as discovery of which sysfs files the
-// sampler should read — the thermal sensor and every hwmon fan — so hardware
+// sampler should read — the thermal sensor, every hwmon fan, and the GPU — so hardware
 // that appears late still gets found.
 //
 // Ported from willshell's SystemStatsService.
@@ -50,10 +50,23 @@ Item {
   // One {percent, usedKb, freeKb, totalKb, device, mount} per real filesystem.
   property var disks: []
 
+  // The first GPU whose driver reports a busy percentage (amdgpu does). Memory
+  // sizes are bytes and can pass 2^31, so they are reals, not ints.
+  property int gpuPercent: -1
+  property int gpuVideoPercent: -1
+  property real gpuVramUsed: -1
+  property real gpuVramTotal: -1
+  property real gpuGttUsed: -1
+  property real gpuGttTotal: -1
+  property int gpuTempC: -1
+  property real gpuPowerW: -1
+  property real gpuClockMhz: -1
+
   // Rolling last-60-samples history, always accumulated so a card's graph is
   // pre-warmed the moment it opens.
   property var cpuHistory: []
   property var memHistory: []
+  property var gpuHistory: []
 
   // ---- viewer-driven cadence ----------------------------------------------
 
@@ -123,8 +136,54 @@ Item {
     fans = nextFans
     fanRpm = firstRpm
 
+    sampleGpu()
+
     cpuHistory = pushHistory(cpuHistory, cpuPercent)
     memHistory = pushHistory(memHistory, memPercent)
+    gpuHistory = pushHistory(gpuHistory, gpuPercent)
+  }
+
+  // Every GPU file is a single number. A file the driver lacks reads empty,
+  // so each value falls back to -1 on its own rather than blanking the rest.
+  function readNumber(view) {
+    view.reload()
+    var v = parseFloat(String(view.text() || "").trim())
+    return isNaN(v) ? -1 : v
+  }
+
+  function sampleGpu() {
+    if (gpuDevice.length === 0) {
+      gpuPercent = -1
+      gpuVideoPercent = -1
+      gpuVramUsed = -1
+      gpuVramTotal = -1
+      gpuGttUsed = -1
+      gpuGttTotal = -1
+      gpuTempC = -1
+      gpuPowerW = -1
+      gpuClockMhz = -1
+      return
+    }
+    var busy = readNumber(gpuBusyFile)
+    gpuPercent = busy >= 0 ? Math.round(Math.min(100, busy)) : -1
+    var video = readNumber(gpuVideoFile)
+    gpuVideoPercent = video >= 0 ? Math.round(Math.min(100, video)) : -1
+    gpuVramUsed = readNumber(gpuVramUsedFile)
+    gpuVramTotal = readNumber(gpuVramTotalFile)
+    gpuGttUsed = readNumber(gpuGttUsedFile)
+    gpuGttTotal = readNumber(gpuGttTotalFile)
+
+    if (gpuTempPath.length > 0) {
+      gpuTempFile.reload()
+      gpuTempC = parseMilliC(gpuTempFile.text())
+    } else {
+      gpuTempC = -1
+    }
+    // hwmon power is microwatts, the clock is hertz.
+    var uw = gpuPowerPath.length > 0 ? readNumber(gpuPowerFile) : -1
+    gpuPowerW = uw >= 0 ? uw / 1e6 : -1
+    var hz = gpuClockPath.length > 0 ? readNumber(gpuClockFile) : -1
+    gpuClockMhz = hz > 0 ? Math.round(hz / 1e6) : -1
   }
 
   function sampleCpu(text) {
@@ -227,11 +286,20 @@ Item {
 
   property var fanSources: [] // [{path, label}]
 
+  property string gpuDevice: ""
+  property string gpuCard: ""
+  property string gpuDriver: ""
+  property string gpuTempPath: ""
+  property string gpuPowerPath: ""
+  property string gpuClockPath: ""
+  property string gpuPowerLabel: ""
+
   function applySlow(text) {
     var lines = String(text || "").trim().split(/\n+/)
     var nextTemp = ""
     var nextFans = []
     var nextDisks = []
+    var nextGpu = { "device": "", "card": "", "driver": "", "temp": "", "power": "", "clock": "", "powerLabel": "" }
     for (var i = 0; i < lines.length; i++) {
       var tokens = lines[i].trim().split(/\s+/)
       if (tokens[0] === "temp" && tokens.length >= 2) {
@@ -247,12 +315,32 @@ Item {
           "device": tokens[5],
           "mount": tokens.slice(6).join(" ")
         })
+      } else if (tokens[0] === "gpu" && tokens.length >= 4) {
+        nextGpu.device = tokens[1]
+        nextGpu.card = tokens[2]
+        nextGpu.driver = tokens[3]
+      } else if (tokens[0] === "gpuhwmon" && tokens.length >= 5) {
+        nextGpu.temp = tokens[1] === "-" ? "" : tokens[1]
+        nextGpu.power = tokens[2] === "-" ? "" : tokens[2]
+        nextGpu.clock = tokens[3] === "-" ? "" : tokens[3]
+        nextGpu.powerLabel = tokens.slice(4).join(" ")
       }
     }
     tempPath = nextTemp
     // Only rebuild the fan readers when the hardware actually changed.
     if (JSON.stringify(nextFans) !== JSON.stringify(fanSources)) fanSources = nextFans
     disks = nextDisks
+    gpuDevice = nextGpu.device
+    gpuCard = nextGpu.card
+    gpuDriver = nextGpu.driver
+    gpuTempPath = nextGpu.temp
+    gpuPowerPath = nextGpu.power
+    gpuClockPath = nextGpu.clock
+    gpuPowerLabel = nextGpu.powerLabel
+  }
+
+  function gpuFile(name) {
+    return gpuDevice.length > 0 ? gpuDevice + "/" + name : ""
   }
 
   // ---- readers -------------------------------------------------------------
@@ -268,6 +356,16 @@ Item {
   }
   FileView { id: cpuInfoFile; path: "/proc/cpuinfo"; blockAllReads: true; printErrors: false }
   FileView { id: tempFile; path: root.tempPath; blockAllReads: true; printErrors: false }
+
+  FileView { id: gpuBusyFile; path: root.gpuFile("gpu_busy_percent"); blockAllReads: true; printErrors: false }
+  FileView { id: gpuVideoFile; path: root.gpuFile("vcn_busy_percent"); blockAllReads: true; printErrors: false }
+  FileView { id: gpuVramUsedFile; path: root.gpuFile("mem_info_vram_used"); blockAllReads: true; printErrors: false }
+  FileView { id: gpuVramTotalFile; path: root.gpuFile("mem_info_vram_total"); blockAllReads: true; printErrors: false }
+  FileView { id: gpuGttUsedFile; path: root.gpuFile("mem_info_gtt_used"); blockAllReads: true; printErrors: false }
+  FileView { id: gpuGttTotalFile; path: root.gpuFile("mem_info_gtt_total"); blockAllReads: true; printErrors: false }
+  FileView { id: gpuTempFile; path: root.gpuTempPath; blockAllReads: true; printErrors: false }
+  FileView { id: gpuPowerFile; path: root.gpuPowerPath; blockAllReads: true; printErrors: false }
+  FileView { id: gpuClockFile; path: root.gpuClockPath; blockAllReads: true; printErrors: false }
 
   // One reader per discovered fan; the fanSample signal fans out a synchronous
   // reload+report to each, so sample() can collect them in source order.

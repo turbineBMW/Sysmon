@@ -163,6 +163,9 @@ why there is no NPU stat.
 Qualcomm sysfs trees (`SYSMON_SYSFS_ROOT`). `tests/gpu-busy` checks the fdinfo
 reader against fake i915 and xe clients (`SYSMON_PROC_ROOT`,
 `SYSMON_DEV_ROOT`), so the Intel paths run on any machine.
+`tests/discover-temp` checks the CPU temperature pick and that discovery never
+opens a sensor it does not need: reading a speaker amp's (wsa884x) hwmon
+temperature wakes the amp and its SoundWire bus, and discovery runs every 30s.
 
 ## Editing it
 

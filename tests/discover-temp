@@ -1,0 +1,68 @@
+#!/bin/bash
+
+# Checks which temperature scripts/sysmon-discover picks, and that it never
+# opens a sensor it does not need: on real hardware a read can power up the
+# device behind it (a wsa884x speaker amp wakes its SoundWire bus on every
+# temp1_input read). Sensors the script must leave alone are FIFOs with no
+# writer, so opening one hangs the run and the timeout fails the test:
+#
+#   tests/discover-temp
+
+set -u
+
+here=$(cd "$(dirname "$0")" && pwd)
+discover="$here/../scripts/sysmon-discover"
+root=$(mktemp -d)
+trap 'rm -rf "$root"' EXIT
+
+failures=0
+
+value() { mkdir -p "$(dirname "$1")"; echo "$2" > "$1"; }
+
+# trap_sensor <file>: a temperature the script must not open.
+trap_sensor() { mkdir -p "$(dirname "$1")"; mkfifo "$1"; }
+
+# check <tree> <expected temp line>
+check() {
+  local got want=$2
+  got=$(SYSMON_SYSFS_ROOT=$root/$1/sys timeout 5 sh "$discover" | grep -E '^temp ' | sed "s|$root/$1/sys|SYS|g")
+  if [[ $got == "$want" ]]; then
+    echo "ok   $1"
+  else
+    echo "FAIL $1"
+    diff <(echo "$want") <(echo "$got") | sed 's/^/     /'
+    failures=$((failures + 1))
+  fi
+}
+
+# Intel: the package label wins, and the unlabelled amp is never opened.
+s=$root/intel/sys/class
+value "$s/hwmon/hwmon0/name" wsa884x
+trap_sensor "$s/hwmon/hwmon0/temp1_input"
+value "$s/hwmon/hwmon1/name" coretemp
+value "$s/hwmon/hwmon1/temp1_label" "Package id 0"
+value "$s/hwmon/hwmon1/temp1_input" 52000
+check intel "temp SYS/class/hwmon/hwmon1/temp1_input"
+
+# Snapdragon: a CPU thermal zone wins; neither speaker amp is opened.
+s=$root/snapdragon/sys/class
+for n in 0 1; do
+  value "$s/hwmon/hwmon$n/name" wsa884x
+  trap_sensor "$s/hwmon/hwmon$n/temp1_input"
+done
+value "$s/thermal/thermal_zone0/type" cpu0-thermal
+value "$s/thermal/thermal_zone0/temp" 41000
+check snapdragon "temp SYS/class/thermal/thermal_zone0/temp"
+
+# Unknown hardware with no thermal zones: the fallback skips the
+# runtime-suspended amp and takes the next sane hwmon sensor.
+s=$root/fallback/sys/class
+value "$s/hwmon/hwmon0/name" wsa884x
+value "$s/hwmon/hwmon0/device/power/runtime_status" suspended
+trap_sensor "$s/hwmon/hwmon0/temp1_input"
+value "$s/hwmon/hwmon1/name" board
+value "$s/hwmon/hwmon1/device/power/runtime_status" active
+value "$s/hwmon/hwmon1/temp1_input" 38000
+check fallback "temp SYS/class/hwmon/hwmon1/temp1_input"
+
+exit $((failures > 0))

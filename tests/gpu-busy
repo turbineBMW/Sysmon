@@ -1,0 +1,99 @@
+#!/bin/bash
+
+# Checks scripts/sysmon-gpu-busy against fake i915 and xe clients, so the
+# Intel paths can be tested on any machine:
+#
+#   tests/gpu-busy
+#
+# Each fake fdinfo is a file its writer rewrites every 50 ms from the clock,
+# so a client set to 50% reads 50% however the samples are timed. i915 counts
+# busy nanoseconds; xe counts busy and elapsed cycles, both from the same
+# instant, so its ratio is exact.
+
+set -u
+
+here=$(cd "$(dirname "$0")" && pwd)
+helper="$here/../scripts/sysmon-gpu-busy"
+root=$(mktemp -d)
+pids=()
+trap 'kill "${pids[@]}" 2>/dev/null; rm -rf "$root"' EXIT
+
+failures=0
+
+# fake_gpu <name>: a card0 with a render node, under $root/<name>.
+fake_gpu() {
+  local r=$root/$1
+  mkdir -p "$r/sys/device/drm/card0" "$r/sys/device/drm/renderD128" "$r/dev/dri" "$r/proc"
+  : > "$r/dev/dri/card0"
+  : > "$r/dev/dri/renderD128"
+}
+
+# fake_fd <name> <pid> <fd> <writer function> <args...>
+fake_fd() {
+  local r=$root/$1 pid=$2 fd=$3 writer=$4
+  shift 4
+  mkdir -p "$r/proc/$pid/fd" "$r/proc/$pid/fdinfo"
+  ln -s "$r/dev/dri/renderD128" "$r/proc/$pid/fd/$fd"
+  "$writer" "$r/proc/$pid/fdinfo/$fd" "$@"
+  ( exec {pause}<> <(:)
+    while :; do
+      "$writer" "$r/proc/$pid/fdinfo/$fd" "$@"
+      read -rt 0.05 -u "$pause"
+    done ) &
+  pids+=($!)
+}
+
+# Counters start from the epoch in microseconds; only their deltas matter.
+
+# i915: busy ns = elapsed ns x share, per engine.
+i915_writer() {
+  local file=$1 id=$2 render=$3 video=$4
+  local e=$(( ${EPOCHREALTIME//[!0-9]/} * 1000 ))
+  printf 'pos:\t0\ndrm-driver:\ti915\ndrm-pdev:\t0000:00:02.0\ndrm-client-id:\t%s\ndrm-total-system0:\t4096 KiB\ndrm-engine-render:\t%s ns\ndrm-engine-copy:\t0 ns\ndrm-engine-video:\t%s ns\ndrm-engine-capacity-video:\t2\ndrm-engine-video-enhance:\t0 ns\n' \
+    "$id" $(( e / 100 * render )) $(( e / 100 * video )) > "$file.new"
+  mv -f "$file.new" "$file"
+}
+
+# xe: busy cycles = elapsed cycles x share; per-mille shares.
+xe_writer() {
+  local file=$1 id=$2 rcs=$3 vcs=$4
+  local k=${EPOCHREALTIME//[!0-9]/}
+  printf 'drm-driver:\txe\ndrm-pdev:\t0000:00:02.0\ndrm-client-id:\t%s\ndrm-cycles-rcs:\t%s\ndrm-total-cycles-rcs:\t%s\ndrm-cycles-bcs:\t0\ndrm-total-cycles-bcs:\t%s\ndrm-cycles-vcs:\t%s\ndrm-total-cycles-vcs:\t%s\ndrm-engine-capacity-vcs:\t1\n' \
+    "$id" $(( k / 1000 * rcs )) $(( k / 1000 * 1000 )) $(( k / 1000 * 1000 )) $(( k / 1000 * vcs )) $(( k / 1000 * 1000 )) > "$file.new"
+  mv -f "$file.new" "$file"
+}
+
+# check <name> <expected busy> <expected video> <tolerance>
+check() {
+  local r=$root/$1 want_busy=$2 want_video=$3 tol=$4 busy video line ok=1
+  line=$(SYSMON_PROC_ROOT=$r/proc SYSMON_DEV_ROOT=$r/dev timeout 5 "$helper" "$r/sys/device" 1 | sed -n 3p)
+  read -r busy video <<< "$line"
+  (( ${busy:--99} >= want_busy - tol && ${busy:--99} <= want_busy + tol )) || ok=
+  (( ${video:--99} >= want_video - tol && ${video:--99} <= want_video + tol )) || ok=
+  if [[ -n $ok ]]; then
+    echo "ok   $1: $line"
+  else
+    echo "FAIL $1: got '$line', want '$want_busy $want_video' (+-$tol)"
+    failures=$((failures + 1))
+  fi
+}
+
+# i915: render 50% + 20% from a second client; the first client's dup'd fd
+# must not count twice. Video 50% of one of two engines is 25%.
+fake_gpu i915
+fake_fd i915 100 3 i915_writer 7 50 50
+fake_fd i915 100 4 i915_writer 7 50 50
+fake_fd i915 200 5 i915_writer 8 20 0
+check i915 70 25 3
+
+# xe: rcs 60% + 10%; vcs 20%.
+fake_gpu xe
+fake_fd xe 300 3 xe_writer 11 600 200
+fake_fd xe 400 6 xe_writer 12 100 0
+check xe 70 20 0
+
+# A GPU with no clients reads -1 (nothing reported), not 0.
+fake_gpu idle
+check idle -1 -1 0
+
+(( failures == 0 ))

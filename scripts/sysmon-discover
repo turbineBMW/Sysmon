@@ -9,8 +9,8 @@
 #   temp <path>
 #   fan <path> <label...>
 #   diskfs <pct> <usedKb> <freeKb> <totalKb> <device> <mount>
-#   gpu <device dir> <card> <driver>
-#   gpuhwmon <temp file|-> <power file|-> <clock file|-> <power label...>
+#   gpu <device dir> <card> <driver> <sysfs|fdinfo>
+#   gpusensors <temp file|-> <power file|-> <clock file|-> <hz|mhz> <power label...>
 #
 # Ported from willshell's system-monitor-slow / system-monitor-temp-path.
 
@@ -100,33 +100,100 @@ for f in "$sysfs_root"/class/hwmon/hwmon*/fan*_input; do
   echo "fan $f $label"
 done
 
-# The first GPU whose driver reports a busy percentage. amdgpu does; i915, xe
-# and nvidia do not, so those machines simply get no GPU reading. The card's
-# own hwmon carries its temperature, power, and shader clock. On an APU the
-# power sensor is "PPT", the whole package, so its label is passed through
-# for the card to say so.
+# The GPU. amdgpu reports its own busy percentage (gpu_busy_percent), so an
+# AMD card wins. Intel (i915, xe) and Qualcomm (msm) report busy time per
+# client in DRM fdinfo instead, which scripts/sysmon-gpu-busy adds up; the
+# source field says which reader Service.qml starts. NVIDIA's driver has
+# neither, so it gets no reading.
+amd_card=
+fd_card=
 for d in "$sysfs_root"/class/drm/card[0-9]*; do
   case ${d##*/} in *-*) continue ;; esac
-  dev="$d/device"
-  [ -r "$dev/gpu_busy_percent" ] || continue
-  driver=$(basename "$(readlink "$dev/driver" 2>/dev/null)" 2>/dev/null)
-  echo "gpu $dev ${d##*/} ${driver:-gpu}"
-  for h in "$dev"/hwmon/hwmon*; do
+  [ -d "$d/device/drm" ] || continue
+  driver=$(basename "$(readlink "$d/device/driver" 2>/dev/null)" 2>/dev/null)
+  if [ -r "$d/device/gpu_busy_percent" ]; then
+    [ -n "$amd_card" ] || amd_card=$d
+  else
+    case $driver in
+      i915|xe|msm*) [ -n "$fd_card" ] || fd_card=$d ;;
+    esac
+  fi
+done
+
+# The hottest thermal zone whose type names the GPU (Qualcomm has one per
+# GPU cluster, gpuss-0..7-thermal).
+hottest_gpu_zone() {
+  best=
+  best_temp=0
+  for z in "$sysfs_root"/class/thermal/thermal_zone*; do
+    case $(cat "$z/type" 2>/dev/null) in
+      gpu*|*-gpu*) ;;
+      *) continue ;;
+    esac
+    sane "$z/temp" || continue
+    t=$(cat "$z/temp")
+    if [ -z "$best" ] || [ "$t" -gt "$best_temp" ]; then
+      best=$z/temp
+      best_temp=$t
+    fi
+  done
+  [ -n "$best" ] && printf '%s\n' "$best"
+}
+
+# The card's own hwmon: temperature, power, and (amdgpu) the shader clock in
+# Hz. On an APU the power sensor is "PPT", the whole package, so its label is
+# passed through for the card to say so.
+temp=- power=- clock=- unit=hz plabel=power
+read_hwmon() {
+  for h in "$1"/hwmon/hwmon*; do
     [ -d "$h" ] || continue
-    temp=-
-    power=-
-    clock=-
-    [ -r "$h/temp1_input" ] && temp="$h/temp1_input"
+    for f in "$h"/temp1_input "$h"/temp*_input; do
+      if sane "$f"; then temp=$f; break; fi
+    done
     if [ -r "$h/power1_average" ]; then power="$h/power1_average"
     elif [ -r "$h/power1_input" ]; then power="$h/power1_input"
     fi
     [ -r "$h/freq1_input" ] && clock="$h/freq1_input"
     plabel=$(cat "$h/power1_label" 2>/dev/null)
-    echo "gpuhwmon $temp $power $clock ${plabel:-power}"
+    plabel=${plabel:-power}
     break
   done
-  break
-done
+}
+
+if [ -n "$amd_card" ]; then
+  d=$amd_card
+  driver=$(basename "$(readlink "$d/device/driver" 2>/dev/null)" 2>/dev/null)
+  echo "gpu $d/device ${d##*/} ${driver:-amdgpu} sysfs"
+  read_hwmon "$d/device"
+  echo "gpusensors $temp $power $clock $unit $plabel"
+elif [ -n "$fd_card" ]; then
+  d=$fd_card
+  driver=$(basename "$(readlink "$d/device/driver" 2>/dev/null)" 2>/dev/null)
+  read_hwmon "$d/device"
+  case $driver in
+    i915)
+      # Actual GT frequency in MHz, 0 while the GT sleeps (RC6).
+      for f in "$d/gt/gt0/rps_act_freq_mhz" "$d/gt_act_freq_mhz"; do
+        if [ -r "$f" ]; then clock=$f; unit=mhz; break; fi
+      done ;;
+    xe)
+      for f in "$d"/device/tile0/gt0/freqs/act_freq; do
+        if [ -r "$f" ]; then clock=$f; unit=mhz; fi
+      done ;;
+    msm*)
+      # The display card owns the DRM nodes; the GPU itself has no hwmon,
+      # but its devfreq gives the clock in Hz and the thermal zones its
+      # temperature.
+      driver=msm
+      for f in "$sysfs_root"/class/devfreq/*gpu*/cur_freq; do
+        if [ -r "$f" ]; then clock=$f; unit=hz; break; fi
+      done
+      zone=$(hottest_gpu_zone)
+      [ -n "$zone" ] && temp=$zone ;;
+  esac
+  echo "gpu $d/device ${d##*/} $driver fdinfo"
+  echo "gpusensors $temp $power $clock $unit $plabel"
+fi
 
 # Real filesystems, deduped by device; btrfs subvolume mounts share a device,
 # so keep the shortest mountpoint.

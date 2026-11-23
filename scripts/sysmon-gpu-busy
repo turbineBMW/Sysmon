@@ -1,0 +1,186 @@
+#!/bin/bash
+
+# GPU load for drivers without a busy-percent file (i915, xe, msm), from the
+# per-client counters DRM publishes in /proc/<pid>/fdinfo. Service.qml starts
+# it once and reads one line per interval:
+#
+#   <busy %> <video %>
+#
+# with -1 for a figure the driver does not report. Busy is the busiest
+# non-video engine (render, compute, copy) and video is the busiest video
+# engine, so a playing video does not read as GPU load, the same split
+# amdgpu's gpu_busy_percent / vcn_busy_percent makes.
+#
+#   sysmon-gpu-busy <device dir> [interval seconds]
+#
+# <device dir> is the card's /sys/class/drm/cardN/device; its drm/ directory
+# names the card and render nodes whose open files count. Only processes this
+# user can read are visible, which on a desktop is nearly all GPU work.
+#
+# Counters, per the kernel's drm-usage-stats:
+#   drm-engine-<e>: <ns> ns             busy time (i915, msm, amdgpu, ...)
+#   drm-cycles-<e> / drm-total-cycles-<e>  busy and elapsed GPU cycles (xe)
+#   drm-engine-capacity-<e>: <n>        engines of that class (default 1)
+#
+# SYSMON_PROC_ROOT and SYSMON_DEV_ROOT point it at a fixture for testing.
+
+set -u
+# Byte-order globbing: locale collation of ~600 /proc entries costs more than
+# the rest of a sample.
+export LC_ALL=C
+
+device=${1:?usage: sysmon-gpu-busy <device dir> [interval seconds]}
+interval=${2:-2}
+proc_root=${SYSMON_PROC_ROOT:-/proc}
+dev_root=${SYSMON_DEV_ROOT:-/dev}
+
+nodes=()
+for n in "$device"/drm/card[0-9]* "$device"/drm/renderD[0-9]*; do
+  [ -e "$n" ] && nodes+=("$dev_root/dri/${n##*/}")
+done
+[ ${#nodes[@]} -gt 0 ] || { echo "sysmon-gpu-busy: no DRM nodes under $device" >&2; exit 1; }
+
+is_video() {
+  case $1 in
+    video|video-enhance|vcs|vecs|dec|enc|enc_1|jpeg|vcn|vpe) return 0 ;;
+  esac
+  return 1
+}
+
+declare -A prev_ns prev_cyc prev_tot known_pids
+pid_list=
+files=()        # fdinfo of every fd open on this GPU, from the last scan
+prev_time=
+tick=0
+# Finding the GPU's fds means a stat of every open fd on the system (~13 ms
+# for ~2500 fds, against ~2 ms for the rest of a sample). Between full
+# rescans only processes that appeared since the last tick are searched, so a
+# new app counts from its next tick; the rescan, every 30 s at the default
+# interval, catches an old process that opens the GPU later.
+rescan_every=15
+
+scan() {
+  local p fd n
+  for p in "$@"; do
+    for fd in "$p"/fd/*; do
+      for n in "${nodes[@]}"; do
+        [[ $fd -ef $n ]] || continue
+        files+=("$p/fdinfo/${fd##*/}")
+        break
+      done
+    done
+  done
+}
+
+sample() {
+  local -A seen=() cur_ns=() cur_cyc=() cur_tot=() cap=()
+  local -a pids=("$proc_root"/[0-9]*) fresh=()
+  local f p line key value id engine first=
+  local -a lines
+
+  if (( tick++ % rescan_every == 0 )); then
+    files=()
+    scan "${pids[@]}"
+  elif [[ ${pids[*]} != "$pid_list" ]]; then
+    for p in "${pids[@]}"; do [[ -n ${known_pids[$p]:-} ]] || fresh+=("$p"); done
+    (( ${#fresh[@]} )) && scan "${fresh[@]}"
+  fi
+  if [[ ${pids[*]} != "$pid_list" ]]; then
+    pid_list=${pids[*]}
+    known_pids=()
+    for p in "${pids[@]}"; do known_pids[$p]=1; done
+  fi
+
+  # mapfile, not a read loop: it is ~8x cheaper on these small files.
+  for f in "${files[@]}"; do
+    id=
+    mapfile -t lines 2>/dev/null < "$f" || continue
+    for line in "${lines[@]}"; do
+      # Split only the lines used; memory and name lines fall through.
+      case $line in
+        drm-client-id:*|drm-engine-*|drm-cycles-*|drm-total-cycles-*) ;;
+        *) continue ;;
+      esac
+      key=${line%%:*}
+      value=${line#*:}
+      value=${value#"${value%%[![:space:]]*}"}
+      value=${value%%[[:space:]]*}
+      case $key in
+        # DRM prints the client id before any driver stats. One client can
+        # sit behind several fds (dup, fork); count it once.
+        drm-client-id)
+          [[ -n ${seen[$value]:-} ]] && break
+          id=$value
+          seen[$id]=1 ;;
+        drm-engine-capacity-*) cap[${key#drm-engine-capacity-}]=$value ;;
+        drm-engine-*) [[ -n $id ]] && cur_ns[$id/${key#drm-engine-}]=$value ;;
+        drm-total-cycles-*) [[ -n $id ]] && cur_tot[$id/${key#drm-total-cycles-}]=$value ;;
+        drm-cycles-*) [[ -n $id ]] && cur_cyc[$id/${key#drm-cycles-}]=$value ;;
+      esac
+    done
+  done
+
+  local now=${EPOCHREALTIME//[!0-9]/}
+  local -A util=()
+  local d t c u
+  if [[ -n $prev_time ]]; then
+    local wall=$(( (now - prev_time) * 1000 ))  # microseconds -> ns
+    # Engine time: a client's share is the busy nanoseconds this window.
+    for key in "${!cur_ns[@]}"; do
+      [[ -n ${cur_tot[$key]:-} ]] && continue   # cycles are the better source
+      [[ -n ${prev_ns[$key]:-} ]] || continue   # new client: no window yet
+      d=$(( cur_ns[$key] - prev_ns[$key] ))
+      (( d > 0 && wall > 0 )) || continue
+      engine=${key#*/}
+      util[$engine]=$(( ${util[$engine]:-0} + d * 10000 / wall ))
+    done
+    # Cycles: busy cycles over the GPU cycles that elapsed for that client.
+    for key in "${!cur_cyc[@]}"; do
+      [[ -n ${cur_tot[$key]:-} && -n ${prev_cyc[$key]:-} && -n ${prev_tot[$key]:-} ]] || continue
+      d=$(( cur_cyc[$key] - prev_cyc[$key] ))
+      t=$(( cur_tot[$key] - prev_tot[$key] ))
+      (( d > 0 && t > 0 )) || continue
+      engine=${key#*/}
+      util[$engine]=$(( ${util[$engine]:-0} + d * 10000 / t ))
+    done
+  fi
+
+  prev_ns=() prev_cyc=() prev_tot=()
+  for key in "${!cur_ns[@]}"; do prev_ns[$key]=${cur_ns[$key]}; done
+  for key in "${!cur_cyc[@]}"; do prev_cyc[$key]=${cur_cyc[$key]}; done
+  for key in "${!cur_tot[@]}"; do prev_tot[$key]=${cur_tot[$key]}; done
+  [[ -n $prev_time ]] || first=1
+  prev_time=$now
+
+  # Engines the driver lists, even idle ones, so an idle GPU reads 0, not -1.
+  local busy=-1 video=-1
+  for key in "${!cur_ns[@]}" "${!cur_cyc[@]}"; do
+    engine=${key#*/}
+    if is_video "$engine"; then video=0; else busy=0; fi
+  done
+  [[ -n $first ]] && return 1
+
+  for engine in "${!util[@]}"; do
+    c=${cap[$engine]:-1}
+    (( c > 0 )) || c=1
+    u=$(( (util[$engine] / c + 50) / 100 ))   # hundredths of a percent -> %
+    (( u > 100 )) && u=100
+    if is_video "$engine"; then
+      (( u > video )) && video=$u
+    else
+      (( u > busy )) && busy=$u
+    fi
+  done
+  echo "$busy $video"
+}
+
+# read -t on a pipe nobody writes to is a sleep without a process per tick.
+exec {pause}<> <(:)
+parent=$PPID
+sample > /dev/null
+while :; do
+  read -rt "$interval" -u "$pause"
+  # Quit with the shell, even if it went without closing the pipe.
+  kill -0 "$parent" 2>/dev/null || exit 0
+  sample || true
+done

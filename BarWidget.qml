@@ -202,6 +202,62 @@ Panel {
 
   Component.onDestruction: if (service && opened) service.removeViewer()
 
+  // ---- pill menu -----------------------------------------------------------
+
+  // Right click opens a checklist of which stats have a pill on the bar. A
+  // widget cannot rewrite the bar layout itself, so ticking a stat runs
+  // scripts/sysmon-pills, which edits shell.json the way `omarchy bar` does;
+  // the bar then builds or drops that pill.
+  property bool menuOpen: false
+
+  readonly property string pillsScript: String(Qt.resolvedUrl("scripts/sysmon-pills")).replace(/^file:\/\//, "")
+
+  // Stats with a pill anywhere on the bar, read from the layout the bar hands
+  // its widgets, so every pill's menu agrees with the bar as it stands.
+  readonly property var statsOnBar: {
+    var layout = bar && bar.layoutConfig ? bar.layoutConfig : ({})
+    var found = []
+    for (var section in layout) {
+      var entries = Array.isArray(layout[section]) ? layout[section] : []
+      for (var i = 0; i < entries.length; i++) {
+        var entry = entries[i]
+        if (!entry || entry.id !== root.moduleName) continue
+        var s = String(entry.stat || "cpu")
+        if (found.indexOf(s) === -1) found.push(s)
+      }
+    }
+    return found
+  }
+
+  // The stat whose change is still on its way to the bar. Further clicks wait
+  // for it, so one menu never queues edits against a layout it has not seen.
+  property string pendingStat: ""
+
+  function statOnBar(s) { return statsOnBar.indexOf(s) !== -1 }
+  // The last pill stays: it is the only way back into this menu.
+  function statLocked(s) { return statOnBar(s) && statsOnBar.length <= 1 }
+
+  function togglePill(s) {
+    if (pendingStat !== "" || statLocked(s)) return
+    pendingStat = s
+    Quickshell.execDetached([pillsScript, s, statOnBar(s) ? "off" : "on"])
+  }
+
+  onStatsOnBarChanged: pendingStat = ""
+
+  Timer {
+    interval: 4000
+    running: root.pendingStat !== ""
+    onTriggered: root.pendingStat = ""
+  }
+
+  // PopupCard closes through its owner; this one closes the menu, not the
+  // card, and the bar's popout handoff closes it when the card opens.
+  QtObject {
+    id: menuOwner
+    function close() { root.menuOpen = false }
+  }
+
   // ---- bar pill ------------------------------------------------------------
 
   WidgetButton {
@@ -216,7 +272,7 @@ Panel {
     active: root.alarming
 
     onPressed: function(code) {
-      if (code === Qt.RightButton && root.bar) root.bar.run("omarchy-launch-or-focus-tui btop")
+      if (code === Qt.RightButton) root.menuOpen = !root.menuOpen
       else root.toggle()
     }
 
@@ -274,6 +330,62 @@ Panel {
           Behavior on width { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
           Behavior on height { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
           Behavior on color { ColorAnimation { duration: 200 } }
+        }
+      }
+    }
+  }
+
+  // ---- menu ----------------------------------------------------------------
+
+  PopupCard {
+    id: menu
+    anchorItem: button
+    owner: menuOwner
+    bar: root.bar
+    open: root.menuOpen
+    contentWidth: menu.fittedContentWidth(Style.space(260))
+    contentHeight: menu.fittedContentHeight(menuColumn.implicitHeight)
+
+    Column {
+      id: menuColumn
+      width: parent.width
+      spacing: Style.space(6)
+
+      Text {
+        textFormat: Text.PlainText
+        text: "Show on bar"
+        color: root.foreground
+        opacity: 0.6
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Repeater {
+        model: Model.statIds()
+
+        Toggle {
+          required property string modelData
+          width: menuColumn.width
+          label: Model.statDef(modelData).title
+          description: root.statLocked(modelData) ? "The last pill stays on the bar" : ""
+          checked: root.pendingStat === modelData ? !root.statOnBar(modelData) : root.statOnBar(modelData)
+          opacity: root.statLocked(modelData) ? 0.6 : 1
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.togglePill(modelData)
+        }
+      }
+
+      PanelSeparator { foreground: root.foreground }
+
+      Button {
+        width: parent.width
+        text: "Open btop"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        onClicked: {
+          root.menuOpen = false
+          if (root.bar) root.bar.run("omarchy-launch-or-focus-tui btop")
         }
       }
     }

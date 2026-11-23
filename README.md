@@ -15,7 +15,8 @@ omarchy plugin add https://github.com/turbineBMW/Sysmon --enable
 ```
 
 The first pill shows CPU usage on the left side of the bar. Left-click a pill
-to open its card. Right-click opens `btop` when it is installed. The plugin
+to open its card. Right-click any pill for a menu that chooses which stats are
+on the bar and opens `btop` when it is installed. The plugin
 reads Linux's `/proc` and `/sys` data and uses standard system tools to find
 disks and sensors; it does not install packages or change system settings.
 Some hardware does not report a temperature or fan speed, so those readings
@@ -25,7 +26,12 @@ reading.
 
 ## Choose your pills
 
-Sysmon allows several copies of its bar widget. In
+Right-click any Sysmon pill and tick the stats you want. Each one gets its own
+pill, kept in the same order as the menu. The last pill can't be unticked,
+since it is the only way back into the menu.
+
+You can also edit the layout by hand. Sysmon allows several copies of its bar
+widget. In
 `~/.config/omarchy/shell.json`, add the entries you want to the existing
 `bar.layout.left` array, for example:
 

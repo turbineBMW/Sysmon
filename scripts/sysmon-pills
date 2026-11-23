@@ -1,0 +1,77 @@
+#!/bin/bash
+
+# Puts one stat's pill on the bar or takes it off, for the right-click menu in
+# BarWidget.qml:
+#
+#   sysmon-pills <cpu|gpu|temperature|memory|fan|disk> <on|off>
+#
+# A bar widget cannot rewrite the layout itself (the shell keeps that for
+# kind "bar" plugins), and `omarchy bar put` leaves a widget that is already on
+# the bar alone, so it cannot add a second pill. This edits shell.json through
+# omarchy-shell-config's commit, the same atomic write-and-reload the
+# `omarchy bar` commands use.
+#
+# A new pill joins the section the other pills are in, in the menu's order, so
+# toggling stats never scatters them. The last pill is never removed: it is the
+# only way back into the menu.
+
+set -euo pipefail
+
+source omarchy-shell-config
+
+stat="${1:-}"
+mode="${2:-}"
+
+case "$stat" in
+  cpu|gpu|temperature|memory|fan|disk) ;;
+  *) fail "stat must be cpu, gpu, temperature, memory, fan, or disk" ;;
+esac
+case "$mode" in
+  on|off) ;;
+  *) fail "mode must be on or off" ;;
+esac
+
+# Every pill shares one menu, so two clicks in quick succession would
+# otherwise race on the same file.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/turbinebmw.sysmon-pills.lock"
+flock 9
+
+HELPERS='
+  def entry_id: if type == "object" then (.id // "" | tostring) else tostring end;
+  def pill: entry_id == $id;
+  def stat_of: if type == "object" then (.stat // "cpu" | tostring) else "cpu" end;
+  def rank: . as $s | ($order | index($s)) // ($order | length);
+  def pills: [.bar.layout[] | arrays | .[] | select(pill)];
+'
+
+if [[ $mode == "off" ]]; then
+  commit "$HELPERS $NORMALIZE
+    | (pills | length) as \$total
+    | (pills | map(select(stat_of == \$stat)) | length) as \$hits
+    | if \$hits == 0 then .
+      elif \$total - \$hits < 1 then error(\"the last sysmon pill stays on the bar\")
+      else .bar.layout |= map_values(
+        if type == \"array\" then map(select((pill and stat_of == \$stat) | not)) else . end)
+      end
+  " \
+    --arg id "turbinebmw.sysmon" \
+    --arg stat "$stat" \
+    --argjson order '["cpu","gpu","temperature","memory","fan","disk"]'
+else
+  commit "$HELPERS $NORMALIZE
+    | if any(pills[]; stat_of == \$stat) then .
+      else
+        (\$stat | rank) as \$rank
+        | (first(.bar.layout | to_entries[]
+            | select(.value | type == \"array\" and any(.[]; pill)) | .key) // \"left\") as \$section
+        | .bar.layout[\$section] as \$list
+        | ([\$list | to_entries[] | select((.value | pill) and (.value | stat_of | rank) < \$rank) | .key] | last) as \$after
+        | ([\$list | to_entries[] | select(.value | pill) | .key] | first) as \$first
+        | (if \$after != null then \$after + 1 elif \$first != null then \$first else (\$list | length) end) as \$at
+        | .bar.layout[\$section] = \$list[0:\$at] + [{id: \$id, stat: \$stat}] + \$list[\$at:]
+      end
+  " \
+    --arg id "turbinebmw.sysmon" \
+    --arg stat "$stat" \
+    --argjson order '["cpu","gpu","temperature","memory","fan","disk"]'
+fi

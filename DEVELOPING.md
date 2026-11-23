@@ -68,7 +68,30 @@ Per-entry settings: `stat`, `mount` (disk only), `fanMaxRpm` (fan only, the
 RPM the meter treats as full scale), `warningThreshold` and
 `criticalThreshold` (percent).
 
-Left click opens the card, right click opens `btop`.
+Left click opens the card. Right click opens the pill menu: a checklist of
+the six stats, then an "Open btop" button.
+
+## Pill menu
+
+A bar widget cannot rewrite the bar layout. The shell only gives
+`mutateShellConfig` to kind `bar` plugins, and `updateEntryInline` rewrites
+every entry with the same id, which would turn all the pills into one stat.
+`omarchy bar put` leaves a widget that is already on the bar alone, so it
+cannot add a second pill either.
+
+So ticking a stat runs `scripts/sysmon-pills <stat> on|off`, which edits
+`shell.json` through `omarchy-shell-config`'s `commit`, the same atomic
+write-and-reload the `omarchy bar` commands use. It:
+
+- adds a new pill to the section the other pills are in, in menu order
+- removes every pill for that stat
+- refuses to remove the last pill, because that pill is the only way back
+  into the menu
+- takes a lock, so quick clicks cannot race on the file
+
+The menu reads which stats are on the bar from `bar.layoutConfig`, so every
+pill's menu matches the bar. While one change is in flight the menu ignores
+further clicks, until the layout updates or 4s pass.
 
 ## Bar height
 

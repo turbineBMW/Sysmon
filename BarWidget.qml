@@ -52,6 +52,26 @@ Panel {
   onBarChanged: resolveService()
   Component.onCompleted: resolveService()
 
+  // A GPU pill keeps the service's per-client GPU reader running (Intel and
+  // Qualcomm); without one the service never walks /proc for it.
+  property var gpuService: null
+
+  function syncGpuUse() {
+    var on = stat === "gpu" && service !== null && typeof service.setGpuUser === "function"
+    if (gpuService && (!on || gpuService !== service)) {
+      // The old service may already be gone after a plugin reload.
+      try { gpuService.setGpuUser(root, false) } catch (e) {}
+      gpuService = null
+    }
+    if (on && gpuService !== service) {
+      service.setGpuUser(root, true)
+      gpuService = service
+    }
+  }
+
+  onServiceChanged: syncGpuUse()
+  onStatChanged: syncGpuUse()
+
   // The service owns the single IPC target and relays by stat name, so
   // `omarchy-shell sysmon toggle memory` reaches exactly one card.
   Connections {
@@ -200,7 +220,12 @@ Panel {
     else service.removeViewer()
   }
 
-  Component.onDestruction: if (service && opened) service.removeViewer()
+  Component.onDestruction: {
+    if (service && opened) service.removeViewer()
+    if (gpuService) {
+      try { gpuService.setGpuUser(root, false) } catch (e) {}
+    }
+  }
 
   // ---- pill menu -----------------------------------------------------------
 
@@ -666,7 +691,10 @@ Panel {
           }
 
           Column {
-            visible: root.stat === "gpu" && !!root.service && root.service.gpuDevice !== ""
+            // Only amdgpu reports memory totals; Intel and Qualcomm GPUs share
+            // system memory and have none to show.
+            visible: root.stat === "gpu" && !!root.service
+              && (root.service.gpuVramTotal > 0 || root.service.gpuGttTotal > 0)
             width: parent.width
             spacing: Style.space(8)
 
@@ -727,7 +755,7 @@ Panel {
             visible: root.stat === "gpu" && (!root.service || root.service.gpuDevice === "")
             width: parent.width
             wrapMode: Text.WordWrap
-            text: "No GPU busy reading found. Sysmon reads amdgpu's gpu_busy_percent; Intel and NVIDIA drivers don't expose one."
+            text: "No supported GPU found. Sysmon reads AMD (amdgpu), Intel (i915, xe) and Qualcomm (msm) GPUs; NVIDIA's driver reports no GPU load."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall

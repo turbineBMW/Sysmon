@@ -1,0 +1,83 @@
+#!/bin/bash
+
+# Checks which GPU scripts/sysmon-discover picks, and where it reads its
+# sensors, on fake AMD, Intel (i915, xe) and Qualcomm (msm) sysfs trees:
+#
+#   tests/discover-gpu
+
+set -u
+
+here=$(cd "$(dirname "$0")" && pwd)
+discover="$here/../scripts/sysmon-discover"
+root=$(mktemp -d)
+trap 'rm -rf "$root"' EXIT
+
+failures=0
+
+# card <tree> <card> <driver>: a DRM card bound to <driver>.
+card() {
+  local s=$root/$1/sys
+  mkdir -p "$s/class/drm/$2/device/drm/$2" "$s/bus/drivers/$3"
+  ln -sfn "$s/bus/drivers/$3" "$s/class/drm/$2/device/driver"
+}
+
+value() { mkdir -p "$(dirname "$1")"; echo "$2" > "$1"; }
+
+# check <tree> <expected gpu and gpusensors lines>
+check() {
+  local got want=$2
+  got=$(SYSMON_SYSFS_ROOT=$root/$1/sys sh "$discover" | grep -E '^gpu' | sed "s|$root/$1/sys|SYS|g")
+  if [[ $got == "$want" ]]; then
+    echo "ok   $1"
+  else
+    echo "FAIL $1"
+    diff <(echo "$want") <(echo "$got") | sed 's/^/     /'
+    failures=$((failures + 1))
+  fi
+}
+
+# AMD APU next to an Intel card: amdgpu's own busy file wins.
+card amd card0 i915
+card amd card1 amdgpu
+s=$root/amd/sys/class/drm/card1/device
+value "$s/gpu_busy_percent" 12
+value "$s/hwmon/hwmon3/temp1_input" 48000
+value "$s/hwmon/hwmon3/power1_average" 9000000
+value "$s/hwmon/hwmon3/power1_label" PPT
+value "$s/hwmon/hwmon3/freq1_input" 800000000
+check amd "gpu SYS/class/drm/card1/device card1 amdgpu sysfs
+gpusensors SYS/class/drm/card1/device/hwmon/hwmon3/temp1_input SYS/class/drm/card1/device/hwmon/hwmon3/power1_average SYS/class/drm/card1/device/hwmon/hwmon3/freq1_input hz PPT"
+
+# Intel integrated, i915: the GT clock in MHz, no hwmon.
+card i915 card0 i915
+value "$root/i915/sys/class/drm/card0/gt/gt0/rps_act_freq_mhz" 350
+check i915 "gpu SYS/class/drm/card0/device card0 i915 fdinfo
+gpusensors - - SYS/class/drm/card0/gt/gt0/rps_act_freq_mhz mhz power"
+
+# Intel, xe, with a discrete card's hwmon temperature.
+card xe card0 xe
+s=$root/xe/sys/class/drm/card0/device
+value "$s/tile0/gt0/freqs/act_freq" 1200
+value "$s/hwmon/hwmon5/temp2_input" 51000
+check xe "gpu SYS/class/drm/card0/device card0 xe fdinfo
+gpusensors SYS/class/drm/card0/device/hwmon/hwmon5/temp2_input - SYS/class/drm/card0/device/tile0/gt0/freqs/act_freq mhz power"
+
+# Qualcomm: the display card (msm_dpu) owns the nodes; devfreq has the clock
+# and the hottest gpuss zone the temperature.
+card msm card1 msm_dpu
+s=$root/msm/sys/class
+value "$s/devfreq/3d00000.gpu/cur_freq" 300000000
+value "$s/thermal/thermal_zone1/type" cpu-0-0-0-thermal
+value "$s/thermal/thermal_zone1/temp" 60000
+value "$s/thermal/thermal_zone40/type" gpuss-0-thermal
+value "$s/thermal/thermal_zone40/temp" 35100
+value "$s/thermal/thermal_zone41/type" gpuss-1-thermal
+value "$s/thermal/thermal_zone41/temp" 36200
+check msm "gpu SYS/class/drm/card1/device card1 msm fdinfo
+gpusensors SYS/class/thermal/thermal_zone41/temp - SYS/class/devfreq/3d00000.gpu/cur_freq hz power"
+
+# NVIDIA alone: no reading at all.
+card nvidia card0 nvidia
+check nvidia ""
+
+(( failures == 0 ))

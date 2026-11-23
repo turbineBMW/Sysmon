@@ -128,13 +128,41 @@ the GPU's sysfs files are read in-process through `FileView` every 2s.
 and to find *where* the thermal sensor, fans, and GPU live, so hardware that
 appears late still gets picked up.
 
-The GPU is the first DRM card whose driver exposes `gpu_busy_percent` (amdgpu
-does; i915, xe, and nvidia do not). Its `mem_info_vram_*`, `mem_info_gtt_*`,
-and `vcn_busy_percent` sit beside it, and its own hwmon gives temperature,
-power, and the shader clock. On an APU the only power sensor is `PPT`, the
-whole package, so the card labels it "Package" rather than claiming it as GPU
-power. The NPU (`amdxdna`) has no busy file at all, which is why there is no
-NPU stat.
+## GPU
+
+`sysmon-discover` picks one GPU and says how to read it:
+
+- **AMD (`amdgpu`)**, preferred when present: the device's own
+  `gpu_busy_percent`, with `vcn_busy_percent`, `mem_info_vram_*` and
+  `mem_info_gtt_*` beside it, and its hwmon for temperature, power, and the
+  shader clock. On an APU the only power sensor is `PPT`, the whole package,
+  so the card labels it "Package" rather than claiming it as GPU power.
+- **Intel (`i915`, `xe`) and Qualcomm (`msm`)** have no busy file. They report
+  busy time per client in `/proc/<pid>/fdinfo` (the kernel's
+  drm-usage-stats), and `scripts/sysmon-gpu-busy` adds that up. Busy is the
+  busiest non-video engine, video the busiest video engine, the same split
+  amdgpu makes. Intel's clock is the GT frequency in MHz (0 while the GT
+  sleeps); Qualcomm's comes from the GPU's devfreq, and its temperature from
+  the hottest `gpuss-*` thermal zone. Neither reports memory totals.
+- **NVIDIA** has neither, so it gets no reading.
+
+The fdinfo reader runs as one long-lived process, started only while a GPU
+pill is on the bar (pills register with `setGpuUser`). Finding the GPU's
+files means a stat of every open fd on the system, so it does that in full
+every 30s and in between only for processes that appeared since the last
+sample; a new app counts from its next sample. It sees only processes this
+user can read, which on a desktop is nearly all GPU work. It costs about 8ms
+of CPU per 2s sample on a Snapdragon X Elite with ~2500 open fds.
+
+The NPU (`amdxdna`, Qualcomm's Hexagon) has no usage counter at all, which is
+why there is no NPU stat.
+
+## Tests
+
+`tests/discover-gpu` checks which GPU discovery picks on fake AMD, Intel, and
+Qualcomm sysfs trees (`SYSMON_SYSFS_ROOT`). `tests/gpu-busy` checks the fdinfo
+reader against fake i915 and xe clients (`SYSMON_PROC_ROOT`,
+`SYSMON_DEV_ROOT`), so the Intel paths run on any machine.
 
 ## Editing it
 

@@ -50,8 +50,10 @@ Item {
   // One {percent, usedKb, freeKb, totalKb, device, mount} per real filesystem.
   property var disks: []
 
-  // The first GPU whose driver reports a busy percentage (amdgpu does). Memory
-  // sizes are bytes and can pass 2^31, so they are reals, not ints.
+  // The GPU sysmon-discover picked: amdgpu reports its busy percentage and
+  // memory in sysfs; Intel (i915, xe) and Qualcomm (msm) only report busy
+  // time per client, which scripts/sysmon-gpu-busy adds up. Memory sizes are
+  // bytes and can pass 2^31, so they are reals, not ints.
   property int gpuPercent: -1
   property int gpuVideoPercent: -1
   property real gpuVramUsed: -1
@@ -152,7 +154,7 @@ Item {
   }
 
   function sampleGpu() {
-    if (gpuDevice.length === 0) {
+    if (gpuDevice.length === 0 || (gpuSource === "fdinfo" && !gpuBusyProc.running)) {
       gpuPercent = -1
       gpuVideoPercent = -1
       gpuVramUsed = -1
@@ -164,14 +166,25 @@ Item {
       gpuClockMhz = -1
       return
     }
-    var busy = readNumber(gpuBusyFile)
-    gpuPercent = busy >= 0 ? Math.round(Math.min(100, busy)) : -1
-    var video = readNumber(gpuVideoFile)
-    gpuVideoPercent = video >= 0 ? Math.round(Math.min(100, video)) : -1
-    gpuVramUsed = readNumber(gpuVramUsedFile)
-    gpuVramTotal = readNumber(gpuVramTotalFile)
-    gpuGttUsed = readNumber(gpuGttUsedFile)
-    gpuGttTotal = readNumber(gpuGttTotalFile)
+    if (gpuSource === "sysfs") {
+      var busy = readNumber(gpuBusyFile)
+      gpuPercent = busy >= 0 ? Math.round(Math.min(100, busy)) : -1
+      var video = readNumber(gpuVideoFile)
+      gpuVideoPercent = video >= 0 ? Math.round(Math.min(100, video)) : -1
+      gpuVramUsed = readNumber(gpuVramUsedFile)
+      gpuVramTotal = readNumber(gpuVramTotalFile)
+      gpuGttUsed = readNumber(gpuGttUsedFile)
+      gpuGttTotal = readNumber(gpuGttTotalFile)
+    } else {
+      // gpuBusyProc's latest line; these GPUs share system memory and
+      // report no totals.
+      gpuPercent = _fdinfoBusy
+      gpuVideoPercent = _fdinfoVideo
+      gpuVramUsed = -1
+      gpuVramTotal = -1
+      gpuGttUsed = -1
+      gpuGttTotal = -1
+    }
 
     if (gpuTempPath.length > 0) {
       gpuTempFile.reload()
@@ -179,11 +192,13 @@ Item {
     } else {
       gpuTempC = -1
     }
-    // hwmon power is microwatts, the clock is hertz.
+    // hwmon power is microwatts. The clock is hertz, except Intel's in MHz,
+    // where 0 is real: the GT is asleep.
     var uw = gpuPowerPath.length > 0 ? readNumber(gpuPowerFile) : -1
     gpuPowerW = uw >= 0 ? uw / 1e6 : -1
-    var hz = gpuClockPath.length > 0 ? readNumber(gpuClockFile) : -1
-    gpuClockMhz = hz > 0 ? Math.round(hz / 1e6) : -1
+    var clock = gpuClockPath.length > 0 ? readNumber(gpuClockFile) : -1
+    if (gpuClockUnit === "mhz") gpuClockMhz = clock >= 0 ? Math.round(clock) : -1
+    else gpuClockMhz = clock > 0 ? Math.round(clock / 1e6) : -1
   }
 
   function sampleCpu(text) {
@@ -289,9 +304,11 @@ Item {
   property string gpuDevice: ""
   property string gpuCard: ""
   property string gpuDriver: ""
+  property string gpuSource: "" // "sysfs" | "fdinfo"
   property string gpuTempPath: ""
   property string gpuPowerPath: ""
   property string gpuClockPath: ""
+  property string gpuClockUnit: "hz"
   property string gpuPowerLabel: ""
 
   function applySlow(text) {
@@ -299,7 +316,7 @@ Item {
     var nextTemp = ""
     var nextFans = []
     var nextDisks = []
-    var nextGpu = { "device": "", "card": "", "driver": "", "temp": "", "power": "", "clock": "", "powerLabel": "" }
+    var nextGpu = { "device": "", "card": "", "driver": "", "source": "", "temp": "", "power": "", "clock": "", "unit": "hz", "powerLabel": "" }
     for (var i = 0; i < lines.length; i++) {
       var tokens = lines[i].trim().split(/\s+/)
       if (tokens[0] === "temp" && tokens.length >= 2) {
@@ -315,15 +332,17 @@ Item {
           "device": tokens[5],
           "mount": tokens.slice(6).join(" ")
         })
-      } else if (tokens[0] === "gpu" && tokens.length >= 4) {
+      } else if (tokens[0] === "gpu" && tokens.length >= 5) {
         nextGpu.device = tokens[1]
         nextGpu.card = tokens[2]
         nextGpu.driver = tokens[3]
-      } else if (tokens[0] === "gpuhwmon" && tokens.length >= 5) {
+        nextGpu.source = tokens[4]
+      } else if (tokens[0] === "gpusensors" && tokens.length >= 6) {
         nextGpu.temp = tokens[1] === "-" ? "" : tokens[1]
         nextGpu.power = tokens[2] === "-" ? "" : tokens[2]
         nextGpu.clock = tokens[3] === "-" ? "" : tokens[3]
-        nextGpu.powerLabel = tokens.slice(4).join(" ")
+        nextGpu.unit = tokens[4]
+        nextGpu.powerLabel = tokens.slice(5).join(" ")
       }
     }
     tempPath = nextTemp
@@ -333,14 +352,60 @@ Item {
     gpuDevice = nextGpu.device
     gpuCard = nextGpu.card
     gpuDriver = nextGpu.driver
+    gpuSource = nextGpu.source
     gpuTempPath = nextGpu.temp
     gpuPowerPath = nextGpu.power
     gpuClockPath = nextGpu.clock
+    gpuClockUnit = nextGpu.unit
     gpuPowerLabel = nextGpu.powerLabel
+    syncGpuBusy()
   }
 
+  // amdgpu's own files; other drivers have none to read.
   function gpuFile(name) {
-    return gpuDevice.length > 0 ? gpuDevice + "/" + name : ""
+    return gpuDevice.length > 0 && gpuSource === "sysfs" ? gpuDevice + "/" + name : ""
+  }
+
+  // ---- fdinfo GPU reader ---------------------------------------------------
+
+  // Adding up per-client GPU time means walking every process's open files,
+  // so the reader only runs while a GPU pill is on the bar. Pills register
+  // themselves rather than bump a counter, so a pill whose stat changes, or
+  // that registers twice, cannot leave the count wrong.
+  property var _gpuUsers: []
+  readonly property bool gpuWanted: _gpuUsers.length > 0
+
+  function setGpuUser(widget, on) {
+    var i = _gpuUsers.indexOf(widget)
+    if (on && i === -1) _gpuUsers = _gpuUsers.concat([widget])
+    else if (!on && i !== -1) _gpuUsers = _gpuUsers.filter(function(w) { return w !== widget })
+  }
+
+  onGpuWantedChanged: syncGpuBusy()
+
+  property int _fdinfoBusy: -1
+  property int _fdinfoVideo: -1
+  property string _gpuBusyDevice: ""
+  property bool _gpuBusySwitching: false
+
+  readonly property string gpuBusyScript: String(Qt.resolvedUrl("scripts/sysmon-gpu-busy")).replace(/^file:\/\//, "")
+
+  // Starts, stops, or (after the GPU changed) restarts the reader. A reader
+  // that exited on its own is started again on the next discovery pass.
+  function syncGpuBusy() {
+    var want = gpuWanted && gpuSource === "fdinfo" && gpuDevice.length > 0
+    if (gpuBusyProc.running && (!want || _gpuBusyDevice !== gpuDevice)) {
+      _gpuBusySwitching = want
+      gpuBusyProc.running = false
+      return
+    }
+    if (want && !gpuBusyProc.running) {
+      _gpuBusyDevice = gpuDevice
+      _fdinfoBusy = -1
+      _fdinfoVideo = -1
+      gpuBusyProc.command = ["bash", gpuBusyScript, gpuDevice, String(fastPoll.interval / 1000)]
+      gpuBusyProc.running = true
+    }
   }
 
   // ---- readers -------------------------------------------------------------
@@ -389,6 +454,30 @@ Item {
           fanFile.reload()
           root._fanReadings[fanScope.modelData.path] = root.parseCount(fanFile.text())
         }
+      }
+    }
+  }
+
+  Process {
+    id: gpuBusyProc
+    stdout: SplitParser {
+      onRead: function(line) {
+        var parts = String(line).trim().split(/\s+/)
+        var busy = parseInt(parts[0])
+        var video = parseInt(parts[1])
+        root._fdinfoBusy = isNaN(busy) ? -1 : busy
+        root._fdinfoVideo = isNaN(video) ? -1 : video
+      }
+    }
+    onRunningChanged: {
+      if (running) return
+      root._fdinfoBusy = -1
+      root._fdinfoVideo = -1
+      // Stopped to switch GPUs: start the new one now. One that died waits
+      // for the next discovery pass, so a failing reader cannot spin.
+      if (root._gpuBusySwitching) {
+        root._gpuBusySwitching = false
+        Qt.callLater(root.syncGpuBusy)
       }
     }
   }

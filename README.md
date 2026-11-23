@@ -20,9 +20,9 @@ on the bar and opens `btop` when it is installed. The plugin
 reads Linux's `/proc` and `/sys` data and uses standard system tools to find
 disks and sensors; it does not install packages or change system settings.
 Some hardware does not report a temperature or fan speed, so those readings
-may be unavailable. The GPU pill needs a driver that reports a busy
-percentage, which today means AMD (`amdgpu`); Intel and NVIDIA GPUs show no
-reading.
+may be unavailable. The GPU pill works with AMD (`amdgpu`), Intel (`i915`,
+`xe`) and Qualcomm (`msm`) graphics. NVIDIA's driver reports no GPU load, so
+NVIDIA cards show no reading.
 
 ## Choose your pills
 
